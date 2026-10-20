@@ -1,0 +1,143 @@
+#!/bin/sh
+set -eu
+
+hosts_file="${DHCP_HOSTS_FILE:-/deployment/dnsmasq/dhcp-hosts.conf}"
+config_file="${DNSMASQ_CONFIG_FILE:-/deployment/dnsmasq/dnsmasq.conf}"
+active_file=/var/lib/misc/dnsmasq-active.conf
+working_file=/var/lib/misc/dnsmasq-working.conf
+previous_file=/var/lib/misc/dnsmasq-previous.conf
+candidate_file=/var/lib/misc/dnsmasq-candidate.conf
+rejected_file=/var/lib/misc/dnsmasq-rejected.conf
+hosts_snapshot=/var/lib/misc/dhcp-hosts-active.conf
+pid_file=/var/lib/misc/dnsmasq.pid
+dnsmasq_pid=
+watcher_pid=
+
+# Only normal daemon startup gives us dnsmasq's native startup-success handshake.
+# The wrapper watches its lifetime; Docker remains responsible for restarts.
+for argument in "$@"; do
+    case "$argument" in
+        -k|--keep-in-foreground|-d|--no-daemon)
+            echo "Run dnsmasq without foreground/debug flags so startup failures can be rolled back" >&2
+            exit 2
+            ;;
+    esac
+done
+
+accept_config() {
+    if ! cp "$config_file" "$candidate_file"; then
+        echo "Cannot read dnsmasq configuration; keeping the active configuration" >&2
+        return 1
+    fi
+    if dnsmasq --test --conf-file="$candidate_file"; then
+        mv "$candidate_file" "$active_file"
+        rm -f "$rejected_file"
+        return 0
+    fi
+    echo "Rejected dnsmasq configuration; keeping the active configuration" >&2
+    mv "$candidate_file" "$rejected_file"
+    return 1
+}
+
+daemon_alive() {
+    test -n "$dnsmasq_pid" && kill -0 "$dnsmasq_pid" 2>/dev/null &&
+        test "$(cat "/proc/$dnsmasq_pid/comm" 2>/dev/null)" = dnsmasq
+}
+
+stop() {
+    trap - TERM INT EXIT
+    if [ -n "$watcher_pid" ]; then
+        kill -TERM "$watcher_pid" 2>/dev/null || true
+    fi
+    if daemon_alive; then
+        kill -TERM "$dnsmasq_pid" 2>/dev/null || true
+        # Allow lease persistence to finish before the container exits.
+        attempts=0
+        while daemon_alive && [ "$attempts" -lt 50 ]; do
+            sleep 0.1
+            attempts=$((attempts + 1))
+        done
+        if daemon_alive; then kill -KILL "$dnsmasq_pid" 2>/dev/null || true; fi
+    fi
+}
+trap stop EXIT
+trap 'exit 0' TERM INT
+
+start_dnsmasq() {
+    rm -f "$pid_file"
+    # Without -k, the original process waits for daemon initialization and
+    # returns failure if socket binding or other startup work fails.
+    if "$@" --pid-file="$pid_file"; then
+        dnsmasq_pid="$(cat "$pid_file")"
+        daemon_alive
+    else
+        return 1
+    fi
+}
+
+# Preserve a previous snapshot when upgrading from an older watcher. It only
+# becomes a working snapshot after a successful real startup below.
+if [ -f "$active_file" ]; then cp "$active_file" "$previous_file"; fi
+if cmp -s "$config_file" "$rejected_file" && [ -f "$working_file" ]; then
+    cp "$working_file" "$active_file"
+else
+    if ! accept_config && [ -f "$working_file" ]; then
+        cp "$working_file" "$active_file"
+    fi
+fi
+test -f "$active_file"
+
+if ! start_dnsmasq "$@"; then
+    echo "dnsmasq startup failed; attempting configuration rollback" >&2
+    cp "$active_file" "$rejected_file"
+    if [ -f "$working_file" ]; then
+        cp "$working_file" "$active_file"
+    elif [ -f "$previous_file" ]; then
+        cp "$previous_file" "$active_file"
+    else
+        echo "No previous working dnsmasq configuration is available" >&2
+        exit 1
+    fi
+    if ! start_dnsmasq "$@"; then
+        echo "dnsmasq rollback also failed; container will exit" >&2
+        exit 1
+    fi
+    echo "Restored working dnsmasq configuration"
+fi
+cp "$active_file" "$working_file.tmp"
+mv "$working_file.tmp" "$working_file"
+cp "$hosts_file" "$hosts_snapshot"
+echo "dnsmasq startup confirmed; working configuration saved"
+
+watch_for_changes() {
+    while daemon_alive; do
+        if ! cmp -s "$config_file" "$active_file" && ! cmp -s "$config_file" "$rejected_file"; then
+            if accept_config; then
+                echo "Network configuration changed; stopping dnsmasq for Docker to restart"
+                return
+            fi
+        fi
+        if ! cmp -s "$hosts_file" "$hosts_snapshot"; then
+            if cp "$hosts_file" "$hosts_snapshot"; then
+                echo "DHCP reservations changed; reloading dnsmasq"
+                kill -HUP "$dnsmasq_pid" || return
+            fi
+        fi
+        # Periodic reconciliation covers missed directory notifications and
+        # detects an unexpected daemon exit without requiring a supervisor.
+        result=0
+        inotifywait --quiet --timeout 5 --event close_write,moved_to,create,delete \
+            "$(dirname "$hosts_file")" "$(dirname "$config_file")" >/dev/null 2>&1 || result=$?
+        if [ "$result" -ne 0 ] && [ "$result" -ne 2 ]; then
+            echo "DHCP configuration watcher failed; container will exit" >&2
+            return
+        fi
+        sleep 0.2
+    done
+    echo "dnsmasq exited unexpectedly; container will restart" >&2
+}
+
+watch_for_changes &
+watcher_pid=$!
+wait "$watcher_pid" || true
+exit 1

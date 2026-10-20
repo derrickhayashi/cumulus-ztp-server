@@ -1,0 +1,84 @@
+#!/bin/bash
+# CUMULUS-AUTOPROVISIONING
+# Rendered by the ZTP service for switches already on the target release.
+
+set -Ee
+IMAGE_SERVER_HOSTNAME="{{ IMAGE_SERVER_HOSTNAME }}"
+IMAGE_SERVER_PORT="{{ NGINX_PORT }}"
+if [[ "$IMAGE_SERVER_HOSTNAME" == *:* ]]; then
+    IMAGE_SERVER_ADDRESS="[$IMAGE_SERVER_HOSTNAME]:$IMAGE_SERVER_PORT"
+else
+    IMAGE_SERVER_ADDRESS="$IMAGE_SERVER_HOSTNAME:$IMAGE_SERVER_PORT"
+fi
+SSH_URL="http://$IMAGE_SERVER_ADDRESS/authorized_keys"
+CONFIG_URL="http://$IMAGE_SERVER_ADDRESS/configs/{{ DEVICE_HOSTNAME }}.yaml"
+
+{% include "report-progress.sh.j2" %}
+DEVICE_HOSTNAME={{ DEVICE_HOSTNAME_SHELL | default(DEVICE_HOSTNAME | tojson) }}
+PROGRESS_STAGE=prepare
+trap provisioning_error ERR
+
+function ping_until_reachable(){
+    last_code=1
+    max_tries=30
+    tries=0
+    while [ "0" != "$last_code" ] && [ "$tries" -lt "$max_tries" ]; do
+        tries=$((tries+1))
+        echo "$(date) INFO: ( Attempt $tries of $max_tries ) Pinging $1 Target Until Reachable."
+        if ping "$1" -c2 --no-vrf-switch &> /dev/null; then
+            last_code=0
+        else
+            last_code=$?
+        fi
+            sleep 1
+    done
+    if [ "$tries" -eq "$max_tries" ] && [ "$last_code" -ne "0" ]; then
+        echo "$(date) ERROR: Reached maximum number of attempts to ping the target $1 ."
+        report_progress "$PROGRESS_STAGE" failed 1
+        exit 1
+    fi
+}
+
+report_progress prepare started
+
+# Uncomment to setup SSH key authentication for Ansible
+mkdir -p /home/cumulus/.ssh
+{% if AUTHORIZED_KEYS_SHELL is defined and AUTHORIZED_KEYS_SHELL is not none %}
+printf '%s' {{ AUTHORIZED_KEYS_SHELL }} > /home/cumulus/.ssh/authorized_keys
+{% else %}
+wget -q -O /home/cumulus/.ssh/authorized_keys $SSH_URL
+{% endif %}
+
+# Uncomment to unexpire and change the default cumulus user password
+passwd -x 99999 cumulus
+printf '%s\n' {{ ('cumulus:' ~ CUMULUS_PASSWORD) | shellquote }} | chpasswd
+
+# Uncomment to make user cumulus passwordless sudo
+echo "cumulus ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/10_cumulus
+
+# Uncomment to enable all debian sources & netq apps3 repo
+# sed -i 's/#deb/deb/g' /etc/apt/sources.list
+# wget -q -O pubkey https://apps3.cumulusnetworks.com/setup/cumulus-apps-deb.pubkey
+# apt-key add pubkey
+# rm pubkey
+
+ping_until_reachable $IMAGE_SERVER_HOSTNAME
+
+report_progress prepare succeeded
+PROGRESS_STAGE=config_download
+report_progress config_download started
+curl -sf "$CONFIG_URL" -o "/tmp/$DEVICE_HOSTNAME.yaml"
+test -s "/tmp/$DEVICE_HOSTNAME.yaml"
+report_progress config_download succeeded
+PROGRESS_STAGE=config_apply
+report_progress config_apply started
+nv config replace "/tmp/$DEVICE_HOSTNAME.yaml"
+nv config apply -y
+report_progress config_apply succeeded
+PROGRESS_STAGE=config_save
+report_progress config_save started
+nv config save
+report_progress config_save succeeded
+echo "Config applied and saved for $DEVICE_HOSTNAME"
+report_progress provisioning succeeded
+exit 0

@@ -1,0 +1,51 @@
+#!/bin/bash
+# CUMULUS-AUTOPROVISIONING
+# CUMULUS-AUTOPROVISIONING-CASCADE
+# Rendered by the ZTP service when a switch requires an OS upgrade.
+set -Ee
+IMAGE_SERVER_HOSTNAME="{{ IMAGE_SERVER_HOSTNAME }}"
+IMAGE_SERVER_PORT="{{ NGINX_PORT }}"
+if [[ "$IMAGE_SERVER_HOSTNAME" == *:* ]]; then
+    IMAGE_SERVER_ADDRESS="[$IMAGE_SERVER_HOSTNAME]:$IMAGE_SERVER_PORT"
+else
+    IMAGE_SERVER_ADDRESS="$IMAGE_SERVER_HOSTNAME:$IMAGE_SERVER_PORT"
+fi
+IMAGE_SERVER="http://$IMAGE_SERVER_ADDRESS/cumulus-linux-{{ CUMULUS_TARGET_RELEASE }}-mlx-amd64.bin"
+
+{% include "report-progress.sh.j2" %}
+PROGRESS_STAGE=reachability
+trap provisioning_error ERR
+
+function ping_until_reachable(){
+    last_code=1
+    max_tries=30
+    tries=0
+    while [ "0" != "$last_code" ] && [ "$tries" -lt "$max_tries" ]; do
+        tries=$((tries+1))
+        echo "$(date) INFO: ( Attempt $tries of $max_tries ) Pinging $1 Target Until Reachable."
+        if ping "$1" -c2 --no-vrf-switch &> /dev/null; then
+            last_code=0
+        else
+            last_code=$?
+        fi
+            sleep 1
+    done
+    if [ "$tries" -eq "$max_tries" ] && [ "$last_code" -ne "0" ]; then
+        echo "$(date) ERROR: Reached maximum number of attempts to ping the target $1 ."
+        report_progress "$PROGRESS_STAGE" failed 1
+        exit 1
+    fi
+}
+
+
+report_progress reachability started
+ping_until_reachable "$IMAGE_SERVER_HOSTNAME"
+report_progress reachability succeeded
+PROGRESS_STAGE=os_install
+report_progress os_install started
+/usr/cumulus/bin/onie-install -fa -i "$IMAGE_SERVER"
+report_progress os_install succeeded
+echo "OS installation succeeded; rebooting for DHCP ZTP configuration."
+PROGRESS_STAGE=reboot
+report_progress reboot requested
+reboot

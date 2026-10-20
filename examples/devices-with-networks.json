@@ -1,0 +1,31 @@
+{
+  "settings": {
+    "target_os": "5.16.0",
+    "authorized_keys": []
+  },
+  "networks": {
+    "rack-a": {
+      "subnet": "192.0.2.0/24",
+      "gateway": "192.0.2.1"
+    },
+    "rack-b": {
+      "subnet": "198.51.100.0/24",
+      "gateway": "198.51.100.1"
+    }
+  },
+  "devices": {
+    "example-leaf01": {
+      "hostname": "example-leaf01",
+      "network": "rack-a",
+      "mgmt_ip": "192.0.2.11",
+      "eth0_mac": "02:00:00:00:01:01"
+    },
+    "example-leaf02": {
+      "hostname": "example-leaf02",
+      "network": "rack-b",
+      "mgmt_ip": "198.51.100.11",
+      "eth0_mac": "02:00:00:00:02:01",
+      "target_os": "5.16.6"
+    }
+  }
+}

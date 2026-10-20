@@ -1,0 +1,26 @@
+REPORT_PREFIX={{ REPORT_PREFIX_SHELL | default("''") }}
+REPORT_URL="http://$IMAGE_SERVER_ADDRESS/api/v1/provisioning/events"
+
+function report_progress() {
+    if [ -n "$REPORT_PREFIX" ]; then
+        if ! curl --fail --silent --output /dev/null \
+            --connect-timeout 1 --max-time 2 --retry 0 \
+            -H 'Content-Type: application/json' \
+            --data "$REPORT_PREFIX,\"stage\":\"$1\",\"result\":\"$2\",\"exit_code\":${3:-0}}" \
+            "$REPORT_URL"; then
+            echo "WARNING: Progress report could not be delivered; continuing provisioning." >&2
+        fi
+    fi
+    return 0
+}
+
+function provisioning_error() {
+    local status=$?
+    trap - ERR
+    report_progress "$PROGRESS_STAGE" failed "$status"
+    if [ "$PROGRESS_STAGE" = os_install ]; then
+        echo "ERROR: OS installation failed with status $status." >&2
+    fi
+    echo "ERROR: Provisioning failed at $PROGRESS_STAGE with status $status." >&2
+    exit "$status"
+}

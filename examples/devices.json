@@ -1,0 +1,14 @@
+{
+  "example-leaf01": {
+    "hostname": "example-leaf01",
+    "mgmt_ip": "192.0.2.11",
+    "serial": "EXAMPLE-SERIAL-LEAF01",
+    "eth0_mac": "02:00:00:00:01:01"
+  },
+  "example-leaf02": {
+    "hostname": "example-leaf02",
+    "mgmt_ip": "192.0.2.12",
+    "serial": "EXAMPLE-SERIAL-LEAF02",
+    "eth0_mac": "02:00:00:00:01:02"
+  }
+}

@@ -1,0 +1,88 @@
+name: cumulus-ztp-server
+
+services:
+  ztp:
+    build:
+      context: ./ztp
+    restart: unless-stopped
+    init: true
+    volumes:
+      - ./deployment:/deployment
+      - ztp-progress:/var/lib/ztp
+    expose:
+      - "8080"
+    environment:
+      ZTP_SERVER_ADDRESS: ${ZTP_SERVER_ADDRESS:-192.168.200.1}
+      NGINX_PORT: ${NGINX_PORT:-80}
+      DEVICE_CONFIG_FILE: ${DEVICE_CONFIG_FILE:-/deployment/ztp/devices.json}
+      DHCP_HOSTS_FILE: ${DHCP_HOSTS_FILE:-/deployment/dnsmasq/dhcp-hosts.conf}
+      CUMULUS_PASSWORD: ${CUMULUS_PASSWORD:-cumulus}
+      DNSMASQ_CONFIG_FILE: /deployment/dnsmasq/dnsmasq.conf
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  fetch-cumulus-os:
+    build:
+      context: ./ztp
+    profiles:
+      - tools
+    entrypoint:
+      - fetch-cumulus-os
+    environment:
+      DEVICE_CONFIG_FILE: ${DEVICE_CONFIG_FILE:-/deployment/ztp/devices.json}
+      CUMULUS_IMAGE_DOWNLOADER_BASE_URL: ${CUMULUS_IMAGE_DOWNLOADER_BASE_URL:-https://networkingdownloads.nvidia.com/custhelp/Non_Monetized_Products/SwitchesandGateways/CumulusLinuxforMellanoxSwitches}
+    volumes:
+      - ./deployment/ztp:/deployment/ztp:ro
+      - ./deployment/web:/deployment/web
+
+  nginx:
+    build:
+      context: ./nginx
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    volumes:
+      - ./deployment/web:/deployment/web:ro
+    depends_on:
+      ztp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  dnsmasq:
+    build:
+      context: ./dnsmasq
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      ztp:
+        condition: service_healthy
+    command:
+      - dnsmasq
+      - --log-facility=-
+      - --conf-file=/var/lib/misc/dnsmasq-active.conf
+    volumes:
+      - ./deployment:/deployment:ro
+      - dnsmasq-leases:/var/lib/misc
+    environment:
+      DNSMASQ_CONFIG_FILE: /deployment/dnsmasq/dnsmasq.conf
+      DHCP_HOSTS_FILE: ${DHCP_HOSTS_FILE:-/deployment/dnsmasq/dhcp-hosts.conf}
+    healthcheck:
+      test: ["CMD-SHELL", 'test -s /var/lib/misc/dnsmasq.pid && kill -0 "$$(cat /var/lib/misc/dnsmasq.pid)"']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  ztp-progress:
+  dnsmasq-leases:

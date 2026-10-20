@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Resolve and validate every release before starting any downloads.
+versions="$(python3 - "${1:-}" <<'PYTHON'
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+if sys.argv[1]:
+    versions = {sys.argv[1]}
+else:
+    inventory = Path(os.environ.get("DEVICE_CONFIG_FILE", "/deployment/ztp/devices.json"))
+    data = json.loads(inventory.read_text())
+    structured = isinstance(data.get("devices"), dict) and ("settings" in data or "networks" in data)
+    settings = data.get("settings", {}) if structured else {}
+    devices = data["devices"] if structured else data
+    default = settings.get("target_os")
+    if default is None:
+        default = "5.16.0"
+    versions = {device["target_os"] if device.get("target_os") is not None else default
+                for device in devices.values()}
+    if not versions:
+        raise ValueError("inventory must contain at least one device")
+    if not isinstance(default, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", default):
+        raise ValueError("invalid settings.target_os")
+for version in versions:
+    if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        raise ValueError("target_os must be a release such as 5.16.6")
+print("\n".join(sorted(versions)))
+PYTHON
+)"
+output_dir="${CUMULUS_IMAGE_DIR:-/deployment/web}"
+base_url="${CUMULUS_IMAGE_DOWNLOADER_BASE_URL:-https://networkingdownloads.nvidia.com/custhelp/Non_Monetized_Products/SwitchesandGateways/CumulusLinuxforMellanoxSwitches}"
+base_url="${base_url%/}"
+mkdir -p "$output_dir"
+temporary_file=""
+trap 'if [ -n "$temporary_file" ]; then rm -f "$temporary_file"; fi' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
+while IFS= read -r version; do
+    filename="cumulus-linux-${version}-mlx-amd64.bin"
+    destination="${output_dir}/${filename}"
+    if [ -s "$destination" ]; then
+        echo "Using existing installer ${destination}"
+        continue
+    fi
+    temporary_file="$(mktemp "${destination}.part.XXXXXX")"
+    echo "Downloading ${base_url}/${filename}"
+    curl \
+        --fail \
+        --location \
+        --retry 3 \
+        --show-error \
+        --output "$temporary_file" \
+        "${base_url}/${filename}"
+    if [ ! -s "$temporary_file" ]; then
+        echo "Error: empty installer download for ${version}." >&2
+        exit 1
+    fi
+    chmod 0644 "$temporary_file"
+    mv "$temporary_file" "$destination"
+    temporary_file=""
+    echo "Saved installer to ${destination}"
+done <<< "$versions"
